@@ -1,8 +1,8 @@
-# Groups Scraper
+# Group Scraper
 
 Export all messages from a private Google Group to MBOX format (compatible with Thunderbird, Apple Mail, etc.).
 
-**Disclaimer:** This tool is an independent, open-source project and is not affiliated with, endorsed by, or in any way connected to Google LLC. "Google Groups" is a trademark of Google LLC. Use of that name here is purely descriptive — this tool targets the Google Groups platform but is neither authorized nor supported by Google.
+**Disclaimer:** This tool is an independent, open-source project and is not affiliated with, endorsed by, or in any way connected to Google LLC. "Google Groups" is a trademark of Google LLC. Use of that name here is purely descriptive - this tool targets the Google Groups platform but is neither authorized nor supported by Google.
 
 This software is provided **as is, without warranty of any kind**. The author accepts no liability whatsoever for any damages, data loss, account suspension, legal consequences, or any other harm arising from the use or misuse of this tool. Use it entirely at your own risk.
 
@@ -95,3 +95,7 @@ python scraper.py mygroup@example.com --reauth
 
 **Wrong message content or parsing errors**
 Run with `--debug` and inspect the `.json` files in `debug/` to see the raw data Google returned.
+
+## License
+
+This project is licensed under **GPL v3 or later**. See the [LICENSE](LICENSE) file for details.
