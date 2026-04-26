@@ -1,0 +1,23 @@
+# Auth session (contains sensitive tokens)
+session.json
+
+# Exported data
+exports/
+
+# Browser user data
+user_data/
+
+# Logs and debug artifacts
+*.log
+page_source.html
+debug/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Claude Code local settings
+.claude/
