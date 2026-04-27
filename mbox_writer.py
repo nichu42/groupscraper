@@ -8,14 +8,24 @@ most archival tools.
 """
 import logging
 import hashlib
+import time
+from io import BytesIO
 from pathlib import Path
 from email.message import EmailMessage
-from email.utils import formatdate
-from mailbox import mbox
+from email.generator import BytesGenerator
+from email.utils import formatdate, parsedate_to_datetime
 
 from thread_fetcher import Message
 
 logger = logging.getLogger(__name__)
+
+
+def _to_mbox_date(rfc2822: str) -> str:
+    """Convert an RFC 2822 date string to the ctime format required by the MBOX From_ line."""
+    try:
+        return parsedate_to_datetime(rfc2822).strftime("%a %b %d %H:%M:%S %Y")
+    except Exception:
+        return time.strftime("%a %b %d %H:%M:%S %Y")
 
 
 def _make_content_id(url: str) -> str:
@@ -51,18 +61,30 @@ class MboxWriter:
             return
 
         try:
-            # Open mbox in append mode
-            mb = mbox(str(self.mbox_path))
+            with open(self.mbox_path, "ab") as f:
+                for msg in messages:
+                    email_msg = self._construct_email(msg)
 
-            for msg in messages:
-                email_msg = self._construct_email(msg)
-                mb.add(email_msg)
+                    # RFC 4155 envelope From_ line: "From addr ctime\n"
+                    addr = msg.sender
+                    if "<" in addr and ">" in addr:
+                        addr = addr.split("<")[1].split(">")[0].strip()
+                    envelope_date = _to_mbox_date(msg.date)
+                    envelope = f"From {addr} {envelope_date}\n"
+                    f.write(envelope.encode("ascii", errors="replace"))
 
-            mb.close()
+                    buf = BytesIO()
+                    BytesGenerator(buf, mangle_from_=True).flatten(email_msg)
+                    data = buf.getvalue()
+                    f.write(data)
+                    if not data.endswith(b"\n"):
+                        f.write(b"\n")
+                    f.write(b"\n")  # blank line between messages
+
             logger.info(f"Wrote {len(messages)} messages to {self.mbox_path}")
 
         except Exception as e:
-            logger.error(f"Failed to write MBOX: {e}")
+            logger.error(f"Failed to write MBOX: {e}", exc_info=True)
             raise
 
     def _construct_email(self, msg: Message) -> EmailMessage:
@@ -92,6 +114,8 @@ class MboxWriter:
         email = EmailMessage()
 
         email["From"] = msg.sender
+        if msg.recipients:
+            email["To"] = ", ".join(msg.recipients)
         email["Subject"] = msg.subject
 
         if msg.date:

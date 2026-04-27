@@ -39,10 +39,14 @@ class Message:
     body: str       # Plain-text version derived from body_html
     body_html: str = ""
     attachments: list = None
+    msg_id: str = ""      # Google Groups message ID, used to correlate page-rendered attachments
+    recipients: list = None  # RFC 2822 formatted To: recipients
 
     def __post_init__(self):
         if self.attachments is None:
             self.attachments = []
+        if self.recipients is None:
+            self.recipients = []
 
 
 def parse_attachments_from_html(html: str) -> list[Attachment]:
@@ -118,6 +122,57 @@ def parse_inline_images_from_html(html: str) -> list[Attachment]:
 
         attachments.append(Attachment(filename=filename, url=url, inline=True))
     return attachments
+
+
+def parse_page_attachments_by_msgid(html: str) -> dict:
+    """
+    Extract downloadable attachment metadata from the full rendered page HTML,
+    grouped by Google Groups message ID (``data-message-id`` attribute).
+
+    Google Groups renders the attachment section (``div.c2eF9b``) outside the
+    email body HTML that is embedded in ``ds:11``, so ``parse_attachments_from_html``
+    misses them.  This function scans the full rendered DOM instead and uses
+    positional proximity to associate each attachment with the nearest preceding
+    ``data-message-id`` attribute.
+
+    Args:
+        html: Full rendered HTML of the thread page (e.g. from ``page.content()``).
+
+    Returns:
+        ``{msg_id: [Attachment, ...]}`` — may be empty if no attachments found.
+    """
+    # Collect (position, msg_id) for every data-message-id occurrence
+    msgid_positions = [
+        (m.start(), m.group(1))
+        for m in re.finditer(r'data-message-id="([^"]+)"', html)
+    ]
+    if not msgid_positions:
+        return {}
+
+    result: dict = {}
+    for tag_match in re.finditer(r'<[^>]*data-view-attachment-url="[^"]*"[^>]*>', html, re.DOTALL):
+        tag_html = tag_match.group(0)
+        url_m = re.search(r'data-view-attachment-url="([^"]+)"', tag_html)
+        label_m = re.search(r'aria-label="Download file ([^"]+)"', tag_html)
+        if not url_m or not label_m:
+            continue
+
+        url = url_m.group(1).replace("&amp;", "&")
+        filename = label_m.group(1)
+
+        # Associate with the nearest data-message-id that precedes this tag
+        pos = tag_match.start()
+        nearest_msgid = None
+        for msgid_pos, msgid in msgid_positions:
+            if msgid_pos < pos:
+                nearest_msgid = msgid
+            else:
+                break
+
+        if nearest_msgid is not None:
+            result.setdefault(nearest_msgid, []).append(Attachment(filename=filename, url=url))
+
+    return result
 
 
 class _HTMLToText(HTMLParser):
@@ -240,6 +295,7 @@ def _parse_ds11(data_str: str) -> list[Message]:
     if not isinstance(data, list) or len(data) < 3:
         return []
 
+    group_email = data[0][1] if isinstance(data[0], list) and len(data[0]) > 1 else ""
     message_list = data[2]
     if not isinstance(message_list, list):
         return []
@@ -250,12 +306,27 @@ def _parse_ds11(data_str: str) -> list[Message]:
             msg_data = entry[0][0]   # metadata array
             body_struct = entry[0][1] if len(entry[0]) > 1 else None
 
-            # Sender: msg_data[2] = [[name, avatar, email, uid], ...]
+            msg_id = str(msg_data[1]) if len(msg_data) > 1 and msg_data[1] is not None else ""
+
+            # msg_data[2] = [[sender_name, avatar, sender_email, uid], [[recip_name, avatar, recip_email, uid], ...]]
             sender_arr = msg_data[2]
             first_sender = sender_arr[0] if sender_arr else []
             sender_name = first_sender[0] if len(first_sender) > 0 else ""
             sender_email = first_sender[2] if len(first_sender) > 2 else ""
             sender = f"{sender_name} <{sender_email}>" if sender_name else sender_email
+
+            # Recipients: msg_data[2][1] is a list of [name, avatar, email, uid] entries
+            recipients = []
+            recip_entries = sender_arr[1] if len(sender_arr) > 1 and isinstance(sender_arr[1], list) else []
+            for r in recip_entries:
+                if not isinstance(r, list):
+                    continue
+                r_name = r[0] if len(r) > 0 else ""
+                r_email = r[2] if len(r) > 2 else ""
+                if r_email:
+                    recipients.append(f"{r_name} <{r_email}>" if r_name else r_email)
+            if not recipients and group_email:
+                recipients = [group_email]
 
             subject = msg_data[5] if len(msg_data) > 5 else ""
             timestamp = msg_data[7] if len(msg_data) > 7 else None
@@ -291,6 +362,8 @@ def _parse_ds11(data_str: str) -> list[Message]:
                     body=body,
                     body_html=body_html,
                     attachments=attachments,
+                    msg_id=msg_id,
+                    recipients=recipients,
                 ))
         except Exception as e:
             logger.debug(f"Failed to parse message entry: {e}")
@@ -361,6 +434,27 @@ class ThreadFetcher:
 
             if not messages:
                 logger.warning(f"No messages parsed from ds:11 for {thread_url}")
+
+            # Supplement attachments from the full rendered page HTML.
+            # Google Groups renders the attachment section outside the body HTML
+            # stored in ds:11, so parse_attachments_from_html misses them.
+            for html in html_bodies:
+                page_atts = parse_page_attachments_by_msgid(html)
+                if not page_atts:
+                    continue
+                for msg in messages:
+                    page_list = page_atts.get(msg.msg_id, [])
+                    if page_list:
+                        existing_urls = {a.url for a in msg.attachments}
+                        added = 0
+                        for att in page_list:
+                            if att.url not in existing_urls:
+                                msg.attachments.append(att)
+                                existing_urls.add(att.url)
+                                added += 1
+                        if added:
+                            logger.debug(f"Added {added} page-rendered attachment(s) to message {msg.msg_id}")
+                break
 
             logger.info(f"Extracted {len(messages)} messages from thread")
 

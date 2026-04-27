@@ -12,6 +12,10 @@ import re
 logger = logging.getLogger(__name__)
 
 
+class SessionExpiredError(Exception):
+    """Raised when the crawler lands on an access-error page."""
+
+
 async def _try_next_page(page) -> bool:
     """
     Click the *Next page* button if it exists and is not disabled.
@@ -68,8 +72,7 @@ async def get_all_thread_urls(page, domain: str, group: str, page_load_wait: flo
     current_url = page.url
     logger.info(f"Page title: {await page.title()} | URL: {current_url}")
     if "access-error" in current_url:
-        logger.error("Crawler hit access-error — session may have expired. Re-run with --reauth.")
-        return thread_urls
+        raise SessionExpiredError("Session expired — access-error page detected.")
     # Wait for thread rows to appear; fall back to a fixed delay if selector absent
     try:
         await page.wait_for_selector('[role="listitem"], [data-focus-id]', timeout=10000)

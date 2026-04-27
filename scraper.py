@@ -28,20 +28,52 @@ import argparse
 import asyncio
 import logging
 import shutil
+import sys
 from pathlib import Path
 from datetime import datetime
 
 from auth import ensure_session
-from crawler import get_all_thread_urls
+from crawler import get_all_thread_urls, SessionExpiredError
 from thread_fetcher import ThreadFetcher
 from attachment_downloader import AttachmentDownloader
 from progress import ProgressTracker
 from mbox_writer import MboxWriter
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+
+def _setup_logging():
+    """Configure logging with colored WARNING/ERROR output when writing to a terminal."""
+
+    # Enable ANSI escape codes on Windows (no-op on macOS/Linux where it's always on)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_ulong()
+            ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            ctypes.windll.kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        except Exception:
+            pass
+
+    use_color = sys.stderr.isatty() or sys.stdout.isatty()
+
+    class _ColoredFormatter(logging.Formatter):
+        _YELLOW = "\033[33m"
+        _RED    = "\033[31m"
+        _RESET  = "\033[0m"
+        _COLORS = {logging.WARNING: _YELLOW, logging.ERROR: _RED, logging.CRITICAL: _RED}
+
+        def format(self, record):
+            msg = super().format(record)
+            color = self._COLORS.get(record.levelno, "")
+            return f"{color}{msg}{self._RESET}" if color else msg
+
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    handler = logging.StreamHandler()
+    handler.setFormatter(_ColoredFormatter(fmt) if use_color else logging.Formatter(fmt))
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -111,7 +143,15 @@ async def main():
     try:
         # Step 2: Enumerate all thread URLs from the forum list
         logger.info("Step 2: Crawling forum list for thread URLs")
-        thread_urls = await get_all_thread_urls(page, domain, group, page_load_wait=args.page_load_wait)
+        try:
+            thread_urls = await get_all_thread_urls(page, domain, group, page_load_wait=args.page_load_wait)
+        except SessionExpiredError:
+            logger.warning("Session expired — starting automatic re-authentication...")
+            await context.close()
+            await browser.close()
+            await playwright.stop()
+            page, context, browser, playwright = await ensure_session(group_url, reauth=True)
+            thread_urls = await get_all_thread_urls(page, domain, group, page_load_wait=args.page_load_wait)
         logger.info(f"Found {len(thread_urls)} total threads")
 
         # Filter to pending threads
@@ -133,6 +173,12 @@ async def main():
             att_downloader = AttachmentDownloader(page, save_dir=att_save_dir)
             logger.info(f"Attachments will be downloaded to {att_save_dir}")
 
+        threads_ok = 0
+        threads_failed = 0
+        total_messages = 0
+        total_attachments = 0
+        total_att_failed = 0
+
         for i, thread_url in enumerate(pending_urls, 1):
             logger.info(f"[{i}/{len(pending_urls)}] Processing {thread_url}")
             try:
@@ -144,25 +190,28 @@ async def main():
                     for msg in messages:
                         if msg.attachments:
                             logger.info(f"  → {len(msg.attachments)} attachment(s) found")
-                            await att_downloader.download_all(msg.attachments)
+                            downloaded = await att_downloader.download_all(msg.attachments)
+                            total_attachments += sum(1 for a in downloaded if a.content)
+                            total_att_failed += sum(1 for a in downloaded if not a.content)
 
                 # Write to MBOX
                 if messages:
                     writer.write_messages(messages)
+                    total_messages += len(messages)
 
                 # Mark as completed
                 progress.mark_done(thread_url)
+                threads_ok += 1
 
             except Exception as e:
                 logger.error(f"  → Failed to fetch: {e}")
+                threads_failed += 1
                 if args.debug:
                     logger.info(f"  → Check {debug_dir} for debug files")
 
-        logger.info(f"All pending threads processed")
-        logger.info(f"MBOX file: {mbox_path}")
-
         # Cleanup: remove attachments folder and progress.json after a successful complete run
-        if not progress.get_pending(thread_urls):
+        complete = not progress.get_pending(thread_urls)
+        if complete:
             att_dir = export_dir / "attachments"
             if att_dir.exists():
                 shutil.rmtree(att_dir)
@@ -173,6 +222,25 @@ async def main():
 
         if args.debug:
             logger.info(f"Debug files saved to: {debug_dir}")
+
+        # ── Summary ──────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("━" * 60)
+        logger.info("  SUMMARY")
+        logger.info("━" * 60)
+        logger.info(f"  Threads processed : {threads_ok + threads_failed}")
+        logger.info(f"  Successful        : {threads_ok}")
+        if threads_failed:
+            logger.warning(f"  Failed            : {threads_failed}")
+        logger.info(f"  Messages written  : {total_messages}")
+        if save_attachments:
+            logger.info(f"  Attachments dl'd  : {total_attachments}")
+            if total_att_failed:
+                logger.warning(f"  Attachments failed: {total_att_failed}")
+        logger.info(f"  Output            : {mbox_path}")
+        if not complete:
+            logger.warning(f"  Run incomplete — resume by running the script again")
+        logger.info("━" * 60)
 
     finally:
         await context.close()

@@ -140,7 +140,7 @@ async def ensure_session(group_url: str, reauth: bool = False):
 
     # Save session for future runs
     storage_state = await context.storage_state()
-    with open(storage_file, "w") as f:
+    with open(storage_file, "w", encoding="utf-8") as f:
         json.dump(storage_state, f, indent=2)
 
     logger.info(f"✓ Session saved to {storage_file}")

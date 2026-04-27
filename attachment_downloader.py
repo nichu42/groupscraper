@@ -3,9 +3,14 @@ Attachment downloader for Google Groups messages.
 
 Uses the authenticated Playwright browser session (``page.request``) to fetch
 attachment and inline-image content, so Google's authentication cookies are
-sent automatically.
+sent automatically.  When ``page.request`` fails with a network-layer error
+(e.g. DNS resolution failure for third-party CDN hosts such as
+``lh3.googleusercontent.com``), a fallback fetch is attempted via JavaScript
+``fetch()`` running inside the browser, which uses Chrome's own networking
+stack and DNS resolver.
 """
 import asyncio
+import base64
 import logging
 import mimetypes
 from pathlib import Path
@@ -78,8 +83,43 @@ class AttachmentDownloader:
             return attachment
 
         except Exception as e:
-            logger.error(f"  Failed to download {attachment.filename}: {e}")
+            # page.request uses Node.js DNS; third-party CDN hosts (e.g. lh3.googleusercontent.com)
+            # can fail to resolve while the browser itself has no problem.  Try once more via
+            # the browser's own JS fetch(), which uses Chrome's networking stack.
+            if any(tag in str(e) for tag in ("ENOTFOUND", "ETIMEDOUT", "ECONNREFUSED", "net::")):
+                logger.debug(f"  page.request network error, retrying via browser JS fetch")
+                return await self._fetch_via_browser_js(attachment)
+            logger.warning(f"  Failed to download {attachment.filename}: {e}")
             return attachment
+
+    async def _fetch_via_browser_js(self, attachment: Attachment) -> Attachment:
+        """Fetch *attachment* using the browser's JS ``fetch()`` as a fallback."""
+        try:
+            result = await self.page.evaluate("""async (url) => {
+                const r = await fetch(url, {credentials: 'include'});
+                if (!r.ok) return {ok: false, status: r.status};
+                const bytes = new Uint8Array(await r.arrayBuffer());
+                let bin = '';
+                for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                return {ok: true, contentType: r.headers.get('content-type') || '', data: btoa(bin)};
+            }""", attachment.url)
+            if not result.get("ok"):
+                logger.warning(f"  Failed to download {attachment.filename}: HTTP {result.get('status')}")
+                return attachment
+            attachment.content = base64.b64decode(result["data"])
+            ct = result.get("contentType", "")
+            attachment.content_type = ct.split(";")[0].strip() if ct else (
+                mimetypes.guess_type(attachment.filename)[0] or "application/octet-stream"
+            )
+            if attachment.inline:
+                attachment.content_id = _make_content_id(attachment.url)
+            logger.info(f"  Downloaded {attachment.filename} ({len(attachment.content)} bytes, {attachment.content_type}) [browser fetch]")
+            if self.save_dir:
+                safe_filename = self._sanitize_filename(attachment.filename)
+                (self.save_dir / safe_filename).write_bytes(attachment.content)
+        except Exception as e:
+            logger.warning(f"  Failed to download {attachment.filename}: {e}")
+        return attachment
 
     async def download_all(self, attachments: list[Attachment]) -> list[Attachment]:
         """
@@ -103,8 +143,23 @@ class AttachmentDownloader:
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
-        """Remove or replace characters unsafe for filenames."""
-        unsafe = '<>:"/\\|?*'
-        for ch in unsafe:
+        """Return a filename safe on Windows, macOS, and Linux."""
+        # Replace characters forbidden on Windows (and / which is forbidden everywhere)
+        for ch in r'<>:"/\|?*':
             filename = filename.replace(ch, "_")
-        return filename
+        # Replace control characters
+        filename = "".join("_" if ord(c) < 32 else c for c in filename)
+        # Strip trailing dots and spaces (forbidden on Windows)
+        filename = filename.rstrip(". ")
+        # Prefix Windows reserved names (case-insensitive, with or without extension)
+        _RESERVED = {"CON", "PRN", "AUX", "NUL",
+                     "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
+        stem = filename.split(".")[0].upper()
+        if stem in _RESERVED:
+            filename = "_" + filename
+        # Truncate to 200 chars to stay well clear of Windows MAX_PATH
+        if len(filename) > 200:
+            ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
+            filename = filename[:200 - len(ext) - 1] + ("." + ext if ext else "")
+        return filename or "_"

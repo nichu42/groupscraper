@@ -33,7 +33,7 @@ class ProgressTracker:
         """Load the set of completed thread URLs from disk."""
         if self.progress_file.exists():
             try:
-                with open(self.progress_file) as f:
+                with open(self.progress_file, encoding="utf-8") as f:
                     data = json.load(f)
                     logger.info(f"Loaded {len(data['completed'])} completed threads from {self.progress_file}")
                     return set(data["completed"])
@@ -68,7 +68,7 @@ class ProgressTracker:
     def _save(self):
         """Persist the current completed set to disk."""
         self.progress_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.progress_file, "w") as f:
+        with open(self.progress_file, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "completed": sorted(self.completed_threads),

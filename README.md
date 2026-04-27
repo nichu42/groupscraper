@@ -25,7 +25,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-Requires Python 3.11+ and Google Chrome installed on the system.
+Requires Python 3.10+ and Google Chrome installed on the system (Windows, macOS, Linux).
 
 ## Usage
 
@@ -43,17 +43,19 @@ A Chrome window will open. Log in with your Google account and wait for the grou
 python scraper.py mygroup@example.com
 ```
 
-The saved session is reused. If it has expired, the script will prompt you to log in again.
+The saved session is reused. If it has expired, the script detects this automatically and opens a browser window for re-authentication before continuing.
 
 ### All options
 
 ```
-GROUP_EMAIL       Group email address (e.g. mygroup@example.com)
---reauth          Force re-authentication (delete and renew saved session)
---debug           Save raw ds:11 JSON blocks to debug/ for inspection
---limit N         Process only the first N pending threads (useful for testing)
---attachments     Download and embed attachments in MBOX
---no-attachments  Skip attachments (no prompt)
+GROUP_EMAIL            Group email address (e.g. mygroup@example.com)
+--reauth               Force re-authentication (delete and renew saved session)
+--debug                Save raw ds:11 JSON blocks to debug/ for inspection
+--limit N              Process only the first N pending threads (useful for testing)
+--attachments          Download and embed attachments in MBOX
+--no-attachments       Skip attachments (no prompt)
+--page-load-wait SECS  Fallback wait time (seconds) if the thread list does not
+                       appear within 10 s; increase on slow connections (default: 4)
 ```
 
 If the group email is omitted, you will be prompted interactively. Attachments are prompted unless `--attachments` or `--no-attachments` is specified.
@@ -83,9 +85,7 @@ If the scraper is interrupted, re-run the same command. It reads `progress.json`
 ## Troubleshooting
 
 **Session expired mid-run**
-```bash
-python scraper.py mygroup@example.com --reauth
-```
+The script detects session expiry automatically and re-authenticates without needing a restart. Use `--reauth` only to force a fresh login manually.
 
 **0 threads found**
 Verify you can access the group in your browser. Then:
