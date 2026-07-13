@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
@@ -108,19 +109,26 @@ async def ensure_session(group_url: str, reauth: bool = False):
                     logger.info("  → Access error page. Click 'Login' and sign in with your Workspace account.")
                     logger.info("  → After login, the script will navigate to the group automatically.")
 
+                parsed_current = urlparse(current_url)
+                parsed_target = urlparse(group_url)
+                current_host = (parsed_current.hostname or "").lower()
+                target_host = (parsed_target.hostname or "").lower()
+
                 # Check if we've reached the target group page
-                if ("/g/" in current_url and "/a/" in current_url) and "access-error" not in current_url and "accounts.google.com" not in current_url:
+                if ("/g/" in current_url and "/a/" in current_url) and "access-error" not in current_url and current_host != "accounts.google.com":
                     logger.info("✓ Successfully authenticated!")
                     break
 
                 # After login Google redirects to groups.google.com/?pli=1 instead of
-                # following the continue= URL.  Detect any groups.google.com landing
+                # following the continue= URL. Detect any groups.google.com landing
                 # that isn't the target and navigate there directly.
+                target_path = parsed_target.path or "/"
+                current_path = parsed_current.path or "/"
                 if (
-                    "groups.google.com" in current_url
+                    current_host == "groups.google.com"
                     and "access-error" not in current_url
-                    and "accounts.google.com" not in current_url
-                    and group_url.split("groups.google.com")[1] not in current_url
+                    and current_host != "accounts.google.com"
+                    and (target_host != "groups.google.com" or not current_path.startswith(target_path))
                 ):
                     logger.info(f"  → Login complete, navigating to group URL…")
                     try:
