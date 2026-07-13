@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +406,12 @@ class ThreadFetcher:
 
         async def handle_response(response):
             try:
-                if response.status == 200 and "groups.google.com" in response.url and "/c/" in response.url:
+                parsed_url = urlparse(response.url)
+                if (
+                    response.status == 200
+                    and parsed_url.hostname == "groups.google.com"
+                    and "/c/" in parsed_url.path
+                ):
                     body = await response.body()
                     html_bodies.append(body.decode("utf-8", errors="ignore"))
             except Exception as e:
