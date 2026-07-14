@@ -124,11 +124,14 @@ async def ensure_session(group_url: str, reauth: bool = False):
                 # that isn't the target and navigate there directly.
                 target_path = parsed_target.path or "/"
                 current_path = parsed_current.path or "/"
+                # Append trailing slashes to avoid partial path matching (e.g. /mygroup vs /mygroup-other)
+                target_path_slashed = target_path if target_path.endswith("/") else target_path + "/"
+                current_path_slashed = current_path if current_path.endswith("/") else current_path + "/"
                 if (
                     current_host == "groups.google.com"
                     and "access-error" not in current_url
                     and current_host != "accounts.google.com"
-                    and (target_host != "groups.google.com" or not current_path.startswith(target_path))
+                    and (target_host != "groups.google.com" or not current_path_slashed.startswith(target_path_slashed))
                 ):
                     logger.info(f"  → Login complete, navigating to group URL…")
                     try:
